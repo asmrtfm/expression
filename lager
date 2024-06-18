@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+
+#!/usr/bin/env bash
+Usage() { cat <<'EOL'
+_________/\\\_______________/\\\\\\\ _______/\\\\\\\\ ___/\\\\\\\\\\\ __/\\\\\\\\\\\
+_________\/\\\ ____________/\\\////\\\ ____/\\\/////\\\ _\/\\\/////// __\/\\\//////\\\
+__________\/\\\ __________/\\\ ___\/\\\ ___\/\\\ __\///___\/\\\ _________\/\\\ ___/\\\
+___________\/\\\ _________\/\\\\\\\\\\\\\ __\/\\\ _________\/\\\\\\\\\ ___\/\\\\\\\\\/
+____________\/\\\ _________\/\\\///////\\\ __\/\\\ _/\\\\\ _\/\\\/////_____\/\\\////\\\\
+_____________\/\\\ _________\/\\\ ____\/\\\ __\/\\\ \///\\\ _\/\\\ _________\/\\\ _\///\\\
+______________\/\\\ _________\/\\\ ____\/\\\ __\/\\\ __\/\\\ _\/\\\ _________\/\\\ ___\//\\\
+_______________\/\\\\\\\\\\\ _\/\\\ ____\/\\\ __\//\\\\\\\\/ __\/\\\\\\\\\\ __\/\\\ ____\/\\\
+USAGE __________\///////////___\/// _____\///_____\////////_____\//////////____\///______\///
+         lager.sh  <start|stop>  [<option>]  [<route ...>]
+SYNOPSIS
+         Activate/deactivate logging for optionally specifiable route(s).
+         After logging has been activated,
+          the default behavior is to display a simple log-count monitor.
+PARAMETERS
+       install:   install middleware and route loggers.
+     uninstall:   uninstall middleware and route loggers.
+         start:   activate logging for [specified||all] routes.
+         stop :   manually deactivate logging for [specified||all] routes.
+    `route(s)`:   relative path(s) to files in the routes directory.
+OPTIONS
+      -h, --help   :   reveal this helpful usage information.
+      -a, --all    :   activate|deactive logging for all routes/endpoints.
+      -q, --quiet  :   do not display monitor after activating logging.
+      -s, --status :   get current log counts and list of actively logged routes.
+      -m, --monitor:   activate monitoring mode.
+NOTES
+   * to [un]install: be in project root directory, call script from relative path (`../../wherever/lager install`)
+   * logging is automatically deactivated during cleanup of the monitoring process.
+   * if invoked with the `-q` flag, do not forget to manually deactivate with `stop`.
+   * the clock displayed during monitoring will be set to UTC (or the server's locale)
+      this can be adjusted by passing the desired timezone as an environment variable
+      at runtime.  for example: ` TZ='America/New_York' ./lager.sh ... `
+                                ` TZ='America/Kentucky/Louisville' ./lager.sh ... `
+
+EOL
+
+	exit ${1:-0}
+}
+[[ "${1,,}" != +(\-)@(h)?(elp) ]] || Usage
+
+_viewer() {
+	#echo 'USAGE:      lager view [<OPTIONS>] <ROUTE> [<ENDPOINT>] *WIP'
+	#echo '                                    (dir)   (log file)'
+	viewerUsage() {
+		echo 'USAGE:   lager view <LOGFILE> (.logs/...)'
+		echo 'OPTIONS:'
+		echo '         -p          : pretty print (default is line-oriented (`jq -c`))'
+		echo '         -n <NUMBER> : only print the last <N> entries'
+		echo ''
+	}
+	viewReq() {
+		local -i n=${1}
+		if [[ "${3:-}" == 'Pretty' ]]; then
+			if ((n == 0)); then
+				jq '.' -- "$2"
+			else
+				tail -n${n} "$2" | jq '.'
+			fi
+		else
+			if ((n == 0)); then
+				jq -c '.' -- "$2"
+			else
+				tail -n${n} "$2" | jq -c '.'
+			fi
+		fi
+	}
+	viewRes() {
+		local -i i=${1}
+		if ((i == 0)); then
+			jq '.' -- "$2"
+		else
+			tail -n${i} "$2" | jq '.'
+		fi
+	}
+	viewPrettyRes() {
+		local -i len=$(wc -l < "$2")
+		((len != 0)) || return 1
+		local -i n=${1}
+		if ((n==0)); then
+			# whole file
+			((n = 1))
+		else
+			# last <n> lines
+			(( n = len - n ))
+			(( n = n <= 0 ? 1 : n + 1 ))
+		fi
+		for((i=n;i<=len;i++)){
+			sed -n "${i}p" "$2" | jq '.timestamp, .method, .url'
+			sed -n "${i}p" "$2" | jq -r '.responseBody' | jq -c
+			echo ""
+		}
+	}
+	local Log='' Kind=''
+	local -i N=0
+	for((x=1;x<=$#;x++)){
+		[[ "${!x,,}" != *(\-)@(h)?(elp) ]] || { viewerUsage; break; }
+		case "${!x}" in
+		'-n') ((++x)); [[ "${!x}" != +([[:digit:]]) ]] || N=${!x} ;;
+		'-p'|'--pretty') Kind='Pretty' ;;
+		*) [[ ! -f "${!x}" ]] || Log="${!x}"
+		esac
+	}
+	[[ -f "$Log" ]] || return 1
+	if [[ "${Log,,}" == *'responses.json' ]]; then
+		view${Kind}Res $N "$Log"
+	else
+		viewReq $N "$Log" ${Kind:-}
+	fi
+}
+
+ALL=false
+QUIET=false
+declare -ga Routes=()
+unset Action 2>/dev/null
+mkdir -p .logs
+
+## activate|deactivate logging for a given route/endpoint
+enablager() { sed -i '/Lager/s/^\/\///' "$1"; }
+disablager() { sed -i '/Lager/s/^/\/\//' "$1"; }
+_start() { grep -sIqE "^[^\/\/].*(Request|Response)Lager" "$1" || enablager "$1"; }
+_stop() { grep -qvIsE "^[^\/\/].*(Request|Response)Lager" "$1" || disablager "$1"; }
+
+## returns list of logfiles
+countLogs() { find $1 -type f -name "*.log" -exec wc -l '{}' \; | awk '!/^0/ && !/lager/ { print $0 }' | sort -k 2 | column -t; }
+
+## updates .logs/lager.log with the current log counts (same info displayed during monitoring)
+updateCount() { { date ; countLogs '.logs/' ; echo "" ; } | tee .logs/lager.log ; }
+
+## deactivate logging on exit (unless ran with `-q`)
+onExit() {
+	tput reset
+	for((r=0;r<${#Routes[@]};r++)){ _stop "${Routes[r]}"; }
+	updateCount >/dev/null
+	exit 0
+}
+trap onExit SIGINT
+
+## generates log counts
+showLogs() {
+	local -i i=0 x=$(shize x)
+	while read line; do
+		tput cup $((++i)) 0; printf "${line}%$((x-${#line}-1))s\n"
+	done < <(if ((${#Routes[@]} != 0)); then
+			for((r=0;r<${#Routes[@]};r++)){
+				routeName="$(basename -s '.js' ${Routes[r]})";
+				mkdir -p .logs/${routeName}
+				countLogs ".logs/${routeName}/"
+			}
+		else countLogs '.logs/'; fi
+	)
+}
+
+## reports which if any routes are being monitored
+chkStatus() {
+	updateCount
+	local -i i=0
+	local -a Active=()
+	for r in routes/*.js ; do ((++i))
+		grep -qvIsE "^[^\/].*(Request|Response)Lager" $r >/dev/null || Active[${#Active[@]}]="$(basename -s '.js' $r)"
+	done
+	case ${#Active[@]} in
+	0) printf '\nNo routes are being logged.\n' ;;
+	$i) printf '\nActively logging all routes.\n' ;;
+	*)
+		printf 'Actively logging:\n'
+		for((r=0;r<${#Active[@]};r++)){ echo "${Active[r]}"; }
+	esac
+	exit 0
+}
+
+## display the real-time log monitor
+Monitor() {
+	tput clear civis
+	while :; do
+		tput setaf 3 cup 0 0; date; tput sgr0
+		showLogs; tput sgr0
+		sleep 3
+	done
+}
+iRoutes() {
+	local GREP_OPTIONS='-m1 -sHIniE' GREP_TARGET="${1:-routes}"
+	[[ -d "$1" || $# == 0 && -d routes ]] && GREP_OPTIONS+='R'
+	[[ ! -e $GREP_TARGET ]] || { grep $GREP_OPTIONS '\s*const\s*router\s*\=\s*express\.' "$GREP_TARGET" | awk -F\: '!a[$1]++ {print $2,$1}'; }
+}
+uRoutes() { grep -m1 -slIR "Lager" routes ; }
+insertLager() { local -ai x=( $1 $1 ); local -a Insertions;
+	Insertions[0]="import { RequestLager, ResponseLager } from '../middlewares/Lager.js';"
+	Insertions[1]="router.use(RequestLager('${2}'));"
+	Insertions[2]="router.use(ResponseLager('${2}'));"
+	! { sed -n "$((++x[1]))p" "$3" | grep -Esq "(r|R)outer\.use\(cors"; } || ((++x[1]))
+	sed -i "$((++x[1]))i${Insertions[1]}\n${Insertions[2]}" "$3"
+	sed -i "$((x>1?x-1:1))i${Insertions[0]}" "$3"
+}
+installagers() {
+	cp -vf ${BASH_SOURCE[0]%\/*}/middleware/Lager.js middlewares/Lager.js || exit 2
+	while read n f ; do
+		cp -vf "$f" "${f%\/*}/.${f##*\/}"
+		insertLager $n "$(basename -s '.js' "$f")" "$f"
+	done < <(iRoutes ${1:-routes} )
+	cp -fv "${BASH_SOURCE[0]}" ./
+	chmod +x lager
+}
+uninstallagers() {
+	for r in $(grep -m1 -lIRs "Lager" routes); do sed -i '/Lager/d' "$r"; done
+	rm -f middlewares/Lager.js
+	[[ ! -f lager ]] || rm -f lager
+}
+
+## parse commandline options
+for((a=1;a<=$#;a++)){
+	case "${!a,,}" in
+	'-v'|*'view') Action='viewer' && break ;;
+	'stop'|'--stop') Action='stop' ;;
+	'start'|'--start') Action='start' ;;
+	'-i'|'--install'|'install') Action='installagers' ;;
+	\-[ru]|*'remove'|*'uninstall') Action='uninstallagers' ;;
+	'-a'|*'all') Routes=(routes/*.js) ;;
+	'-q'|*'quiet') QUIET=true ;;
+	'-s'|*'status') Action='chkStatus' ;;
+	'-m'|*'monitor') Action='Monitor' ;;
+	*)
+		[[ -f "${!a}" ]] && Routes[${#Routes[@]}]="${!a}" || {
+			[[ -f "routes/${!a}" ]] && Routes[${#Routes[@]}]="routes/${!a}" || {
+				[[ ! -f "routes/${!a}.js" ]] || Routes[${#Routes[@]}]="routes/${!a}.js"
+			}
+		}
+	esac
+}
+
+## perform action(s)
+[[ -n ${Action} ]] || Usage 1
+case "${Action}" in
+'viewer') _viewer ${@:a+1} ;;
+'chkStatus'|'Monitor'|'installagers'|'uninstallagers') $Action ;;
+*)
+	((${#Routes[@]} != 0)) || Usage 1
+	for((r=0;r<${#Routes[@]};r++)){ _${Action} "${Routes[r]}"; }
+	${QUIET} || { [[ "$Action" == 'stop' ]] || Monitor ; }
+esac

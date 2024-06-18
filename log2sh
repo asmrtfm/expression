@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+
+[[ "${1,,}" != +(\-)@(h)?(elp) ]] || { echo "For each type of request log in .logs, this will do like 90% of the work in generating a curl script to replicate/test the corresponding endpoint."; exit 0; }
+
+baseUrl='https://nightdistrict.co'
+[[ "${1,,}" != +(\-)@(l)?(ocal) ]] || baseUrl='http://localhost:3000'
+
+method() { tail -n1 "$1" | jq -Mr '.method' -- 2>/dev/null ; }
+_method() { cat <<EOL
+curl -s -X $(method $1) \\
+EOL
+}
+
+url() {
+	local e="$(tail -n1 "$2" | jq -Mr '.url' -- 2>/dev/null)"
+	[[ "${e::1}" == \/ ]] && echo "${1}${e}" || echo "${1}/${e}"
+}
+_url() { cat <<EOL
+	"$(url $1 $2)" \\
+EOL
+}
+
+_body() { cat <<EOL
+	-d $(tail -n1 "$1" | jq -Mc '.body' -- 2>/dev/null)
+EOL
+}
+
+_headers_body() {
+	tail -n1 "$1" | jq -Mr '.headers' -- 2>/dev/null | sed 's/": "/: /g;s/^\s*/\t-H /g;/[{}]/d;s/,$/ \\/g'
+	_body "$1"
+}
+_headers() { tail -n1 "$1" | jq -Mr '.headers' -- 2>/dev/null | sed 's/": "/: /g;s/^\s*/\t-H /g;/[{}]/d;$!s/,$/ \\/g'; }
+
+_payload() {
+	local -i len=$(tail -n1 "$1" | jq -Mrjc '.body' -- 2>/dev/null | wc -m)
+	if ((len > 2)); then _headers_body "$1"; else _headers "$1"; fi
+}
+
+#_() { curl -s -X POST "https://nightdistrict.co/api/review" \
+#  -H "authorization: Bearer $(ndLogin)" \
+#  -H "connection: upgrade" \
+#  -H "host: nightdistrict.co" \
+#  -H "user-agent: Dart/3.3 (dart:io)" \
+#  -H "accept: application/json" \
+#  -H "accept-encoding: gzip" \
+#  -H "content-type: application/json" \
+#  -d $(parseDump ${@})
+#}
+
+#for f in $(find {.,}logs/ -type f -name "*_requests.log"); do
+for f in $(find .logs/ -type f -name "*_requests.log"); do
+	d="${f%\/*}" && mkdir -p .tests/${d#*logs/}
+	of=".tests/${d#*logs/}/${f##*\/}" && of="${of%\.*}.sh"
+	{ _method "$f" ; _url "$baseUrl" "$f" ; _payload "$f" ; } > "$of"
+	sed -i 's|earer .*\"|earer $(./nd_login.sh)\"|' $of
+done
