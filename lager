@@ -193,17 +193,18 @@ insertLager() { local -ai x=( $1 $1 ); local -a Insertions;
 	Insertions[1]="router.use(RequestLager('${2}'));"
 	Insertions[2]="router.use(ResponseLager('${2}'));"
 	! { sed -n "$((++x[1]))p" "$3" | grep -Esq "(r|R)outer\.use\(cors"; } || ((++x[1]))
-	sed -i "$((++x[1]))i${Insertions[1]}\n${Insertions[2]}" "$3"
+	sed -i.bak "$((++x[1]))i${Insertions[1]}\n${Insertions[2]}" "$3"
 	sed -i "$((x>1?x-1:1))i${Insertions[0]}" "$3"
 }
 installagers() {
-	cp -vf ${BASH_SOURCE[0]%\/*}/middleware/Lager.js middlewares/Lager.js || exit 2
+	local lagerSource="$(realpath ${BASH_SOURCE[0]})"
+	cp -vf ${lagerSource%\/*}/middleware/Lager.js middlewares/Lager.js || exit 2
 	while read n f ; do
 		cp -vf "$f" "${f%\/*}/.${f##*\/}"
 		insertLager $n "$(basename -s '.js' "$f")" "$f"
 	done < <(iRoutes ${1:-routes} )
-	cp -fv "${BASH_SOURCE[0]}" ./
-	chmod +x lager
+	echo $'\n'{"middlewares/Lager.js",".logs","routes/*.bak",} >> .gitignore
+	[[ -x $(which lager) ]] 2>/dev/null || { cp -fv "${lagerSource}" ./ ; chmod +x lager ; }
 }
 uninstallagers() {
 	for r in $(grep -m1 -lIRs "Lager" routes); do sed -i '/Lager/d' "$r"; done

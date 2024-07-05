@@ -78,7 +78,7 @@ export function ResponseLager(routeName) {
 				timestamp: new Date().toISOString(),
 				method: req.method,
 				url: req.originalUrl,
-				responseBody: body
+				data: JSON.parse(body)
 			}) + '\n';
 			lager(logFile, logEntry);
 			originalSend(body);
